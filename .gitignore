@@ -1,0 +1,21 @@
+# Original installation workspace: credentials, logs, downloads and reports.
+/work/
+/outputs/
+/build/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.cds
+*.log
+*.jsonl
+auth.json
+auths/
+secrets/
+config.local.*
+desktop-tools-schema.json

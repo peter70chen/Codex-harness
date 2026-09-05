@@ -1,0 +1,14 @@
+# Merge into the existing Codex configuration; replace both placeholders.
+model = "grok-4.6"
+model_reasoning_effort = "high"
+plan_mode_reasoning_effort = "high"
+model_provider = "cliproxyapi"
+model_catalog_json = "/ABSOLUTE/HOME/.codex/cliproxyapi/models.json"
+
+[model_providers.cliproxyapi]
+name = "Local models via CLIProxyAPI"
+base_url = "http://127.0.0.1:8317/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+experimental_bearer_token = "REPLACE_LOCAL_PROXY_KEY"

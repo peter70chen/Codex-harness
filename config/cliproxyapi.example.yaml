@@ -1,0 +1,46 @@
+# Example only. Merge with existing OAuth/provider configuration.
+host: "127.0.0.1"
+port: 8317
+auth-dir: "~/.cli-proxy-api"
+api-keys:
+  - "REPLACE_LOCAL_PROXY_KEY"
+disable-image-generation: "passthrough"
+debug: false
+request-retry: 3
+max-retry-interval: 30
+transient-error-cooldown-seconds: 5
+disable-cooling: false
+
+# Keep Claude excluded in this deployment.
+oauth-excluded-models:
+  claude: ["*"]
+  antigravity: ["claude-*"]
+
+openai-compatibility:
+  - name: "opencode-go"
+    base-url: "https://opencode.ai/zen/go/v1"
+    headers:
+      User-Agent: "Codex-Desktop via CLIProxyAPI/7.2.150"
+      X-OpenCode-Session: "$session-id"
+    api-key-entries:
+      - api-key: "REPLACE_OPENCODE_GO_KEY"
+    models:
+      - name: "glm-5.3-flash"
+        alias: "glm-5.3-flash"
+        thinking:
+          levels: ["high"]
+codex-api-key:
+  - api-key: "REPLACE_OPENCODE_GO_KEY"
+    base-url: "https://opencode.ai/zen/go/v1"
+    headers:
+      User-Agent: "Codex-Desktop via CLIProxyAPI/7.2.150"
+      X-OpenCode-Session: "$session-id"
+    models:
+      - name: "muse-spark-1.3-contributor"
+        alias: "muse-spark-1.3-contributor"
+        is-compat: true
+        thinking:
+          levels: ["high"]
+
+# Add the Muse Gmail schema override using scripts/fix_muse_schema.py.
+# Complete xAI and Antigravity OAuth separately on each machine.

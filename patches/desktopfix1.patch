@@ -1,0 +1,539 @@
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -67,6 +67,7 @@
+ 	}
+ 	body = helps.SetStringIfDifferent(body, "model", baseModel)
+ 	body = normalizeCodexInstructions(body)
++	body = helps.NormalizeDesktopMuseRequestArguments(baseModel, body)
+ 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+ 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+ 	}
+@@ -115,6 +116,7 @@
+ 	}
+ 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+ 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
++		helps.DesktopFailureSummary(baseModel, body, httpResp.StatusCode, "http_response")
+ 		data, readErr := io.ReadAll(httpResp.Body)
+ 		if errClose := httpResp.Body.Close(); errClose != nil {
+ 			log.Errorf("codex executor: close response body error: %v", errClose)
+@@ -133,7 +135,7 @@
+ 		return nil, err
+ 	}
+ 
+-	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
++	buffering := (e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering) || helps.DesktopMuseCompatibilityEnabled(baseModel)
+ 
+ 	scanner := bufio.NewScanner(httpResp.Body)
+ 	scanner.Buffer(nil, 52_428_800) // 50MB
+@@ -175,6 +177,7 @@
+ 				translatedLine = append([]byte("data: "), data...)
+ 				eventType := gjson.GetBytes(data, "type").String()
+ 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
++					helps.DesktopFailureSummary(baseModel, body, streamErr.StatusCode(), "stream_terminal")
+ 					closeBootstrapBody()
+ 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+ 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+@@ -183,6 +186,11 @@
+ 					}
+ 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+ 					reporter.PublishFailure(ctx, streamErr)
++					if helps.DesktopRetryableBootstrap(baseModel, streamErr.StatusCode()) {
++						// No generated item has reached the client; retrying here cannot
++						// duplicate a client-side tool action or partial answer.
++						return nil, streamErr
++					}
+ 					if isCodexOverloadBootstrapFailure(terminalBody) {
+ 						// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
+ 						// attempt before the downstream headers are committed so the conductor can
+@@ -305,6 +313,7 @@
+ 				translatedLine = append([]byte("data: "), data...)
+ 				eventType := gjson.GetBytes(data, "type").String()
+ 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
++					helps.DesktopFailureSummary(baseModel, body, streamErr.StatusCode(), "stream_terminal")
+ 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+ 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+ 						reporter.PublishFailure(ctx, errClearReplay)
+--- a/internal/runtime/executor/helps/claude_input_tokens.go
++++ b/internal/runtime/executor/helps/claude_input_tokens.go
+@@ -29,6 +29,8 @@
+ 	originalRequest []byte
+ 	codec           tokenizer.Codec
+ 	handled         bool
++	desktop         *DesktopResponsesCompat
++	desktopChecked  bool
+ }
+ 
+ // NewClaudeInputTokenState creates request-scoped state for translated Claude input token usage.
+@@ -64,8 +66,15 @@
+ 		param,
+ 	)
+ 	if responseFormat == sdktranslator.FormatOpenAIResponse {
++		if state != nil && !state.desktopChecked {
++			state.desktop = NewDesktopResponsesCompat(model, originalRequestRawJSON, requestRawJSON)
++			state.desktopChecked = true
++		}
+ 		for i, chunk := range chunks {
+ 			chunks[i] = EnsureResponsesUsageDetails(chunk)
++			if state != nil {
++				chunks[i] = state.desktop.Apply(chunks[i])
++			}
+ 		}
+ 	}
+ 	if state == nil {
+--- /dev/null
++++ b/internal/runtime/executor/helps/desktop_responses_compat.go
+@@ -0,0 +1,308 @@
++package helps
++
++import (
++	"bytes"
++	"encoding/json"
++	"os"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++	"github.com/tiktoken-go/tokenizer"
++)
++
++// DesktopResponsesCompat is opt-in, request-local compatibility for the two
++// configured providers. Billing is published by the executor BEFORE this layer.
++type DesktopResponsesCompat struct {
++	model    string
++	request  []byte
++	names    map[string][2]string
++	hosted   bool
++	finished bool
++}
++
++func NewDesktopResponsesCompat(model string, original, translated []byte) *DesktopResponsesCompat {
++	if os.Getenv("CODEX_DESKTOP_COMPAT") != "1" || (model != "grok-4.6" && model != "muse-spark-1.3-contributor") {
++		return nil
++	}
++	s := &DesktopResponsesCompat{model: model, request: bytes.Clone(translated), names: make(map[string][2]string)}
++	if model == "muse-spark-1.3-contributor" {
++		// Match only tools actually declared in this request. Never split an
++		// arbitrary dotted name or overwrite an explicit upstream namespace.
++		rootNames := make(map[string]bool)
++		for _, tool := range gjson.GetBytes(original, "tools").Array() {
++			if tool.Get("type").String() != "namespace" {
++				rootNames[tool.Get("name").String()] = true
++			}
++		}
++		for _, ns := range gjson.GetBytes(original, "tools").Array() {
++			if ns.Get("type").String() != "namespace" {
++				continue
++			}
++			for _, tool := range ns.Get("tools").Array() {
++				n, f := ns.Get("name").String(), tool.Get("name").String()
++				if n != "" && f != "" && !rootNames[n+"."+f] {
++					s.names[n+"."+f] = [2]string{n, f}
++				}
++			}
++		}
++	}
++	return s
++}
++
++func (s *DesktopResponsesCompat) Apply(payload []byte) []byte {
++	if s == nil {
++		return payload
++	}
++	trimmed := bytes.TrimSpace(payload)
++	if len(trimmed) > 0 && trimmed[0] == '{' {
++		return s.applyJSON(trimmed)
++	}
++	lines := bytes.Split(payload, []byte("\n"))
++	changed := false
++	for i, line := range lines {
++		if !bytes.HasPrefix(line, []byte("data:")) {
++			continue
++		}
++		data := bytes.TrimSpace(line[5:])
++		if !gjson.ValidBytes(data) {
++			continue
++		}
++		updated := s.applyJSON(data)
++		if !bytes.Equal(updated, data) {
++			lines[i] = append([]byte("data: "), updated...)
++			changed = true
++		}
++	}
++	if changed {
++		return bytes.Join(lines, []byte("\n"))
++	}
++	return payload
++}
++
++func (s *DesktopResponsesCompat) normalizeItem(data []byte, path string) []byte {
++	item := gjson.GetBytes(data, path)
++	if item.Get("type").String() == "web_search_call" {
++		s.hosted = true
++	}
++	if item.Get("type").String() != "function_call" {
++		return data
++	}
++	// Empty arguments mean an empty object, not an invalid JSON document.
++	// Do this only on completed items, never on the streaming placeholder.
++	if s.model == "muse-spark-1.3-contributor" && gjson.GetBytes(data, "type").String() != "response.output_item.added" && strings.TrimSpace(item.Get("arguments").String()) == "" {
++		data, _ = sjson.SetBytes(data, path+".arguments", "{}")
++	}
++	if item.Get("namespace").String() != "" {
++		return data
++	}
++	if name, ok := s.names[item.Get("name").String()]; ok {
++		data, _ = sjson.SetBytes(data, path+".namespace", name[0])
++		data, _ = sjson.SetBytes(data, path+".name", name[1])
++	}
++	return data
++}
++
++func (s *DesktopResponsesCompat) applyJSON(data []byte) []byte {
++	if !gjson.ValidBytes(data) {
++		return data
++	}
++	kind := gjson.GetBytes(data, "type").String()
++	if s.model == "muse-spark-1.3-contributor" && kind == "response.function_call_arguments.done" {
++		if strings.TrimSpace(gjson.GetBytes(data, "arguments").String()) == "" {
++			data, _ = sjson.SetBytes(data, "arguments", "{}")
++		}
++		if name, ok := s.names[gjson.GetBytes(data, "name").String()]; ok && gjson.GetBytes(data, "namespace").String() == "" {
++			data, _ = sjson.SetBytes(data, "namespace", name[0])
++			data, _ = sjson.SetBytes(data, "name", name[1])
++		}
++	}
++	if kind == "response.output_item.added" || kind == "response.output_item.done" {
++		data = s.normalizeItem(data, "item")
++	}
++	if kind != "response.completed" && kind != "response.incomplete" {
++		return data
++	}
++	for i := range gjson.GetBytes(data, "response.output").Array() {
++		data = s.normalizeItem(data, "response.output."+strconv.Itoa(i))
++	}
++	if s.finished {
++		return data
++	}
++	s.finished = true
++	usage := gjson.GetBytes(data, "response.usage")
++	providerInput, output := usage.Get("input_tokens").Int(), usage.Get("output_tokens").Int()
++	if !s.hosted || providerInput <= 0 {
++		return data
++	}
++	estimate, ok := estimateDesktopInput(s.request)
++	// Do not replace a plausible provider count. Normalize only a clear
++	// cumulative server-tool count, retaining headroom and the original usage.
++	if !ok || providerInput <= estimate+estimate/4 {
++		return data
++	}
++	data, _ = sjson.SetRawBytes(data, "response.provider_usage", []byte(usage.Raw))
++	data, _ = sjson.SetBytes(data, "response.context_usage", map[string]any{
++		"estimated": true, "method": "max(cl100k,o200k) serialized request + 20% + 4096 framing reserve",
++		"input_tokens": estimate, "reason": "hosted_tool_cumulative_usage",
++	})
++	data, _ = sjson.SetBytes(data, "response.usage.input_tokens", estimate)
++	data, _ = sjson.SetBytes(data, "response.usage.total_tokens", estimate+output)
++	cached := min(usage.Get("input_tokens_details.cached_tokens").Int(), estimate)
++	data, _ = sjson.SetBytes(data, "response.usage.input_tokens_details.cached_tokens", cached)
++	if usage.Get("input_tokens_details.cache_write_tokens").Exists() {
++		data, _ = sjson.SetBytes(data, "response.usage.input_tokens_details.cache_write_tokens", min(usage.Get("input_tokens_details.cache_write_tokens").Int(), estimate-cached))
++	}
++	DesktopDiagnostic(map[string]any{"event": "context_usage_normalized", "model": s.model,
++		"provider_input_tokens": providerInput, "provider_output_tokens": output,
++		"provider_total_tokens": usage.Get("total_tokens").Int(), "provider_cached_tokens": usage.Get("input_tokens_details.cached_tokens").Int(),
++		"context_input_estimate": estimate, "request_bytes": len(s.request)})
++	return data
++}
++
++var desktopCodecs struct {
++	sync.Once
++	codecs []tokenizer.Codec
++}
++
++func estimateDesktopInput(body []byte) (int64, bool) {
++	root := gjson.ParseBytes(body)
++	if root.Get("previous_response_id").String() != "" {
++		return 0, false
++	}
++	// Hidden multimodal tokenization cannot safely be inferred from text.
++	var unsupported func(gjson.Result) bool
++	unsupported = func(v gjson.Result) bool {
++		if v.IsObject() {
++			switch v.Get("type").String() {
++			case "input_image", "input_audio", "input_video", "item_reference", "compaction":
++				return true
++			}
++		}
++		found := false
++		v.ForEach(func(_, value gjson.Result) bool {
++			if (value.IsArray() || value.IsObject()) && unsupported(value) {
++				found = true
++				return false
++			}
++			return true
++		})
++		return found
++	}
++	if unsupported(root.Get("input")) {
++		return 0, false
++	}
++	visible := make(map[string]json.RawMessage)
++	for _, key := range []string{"instructions", "input", "tools", "text"} {
++		if v := root.Get(key); v.Exists() {
++			visible[key] = json.RawMessage(v.Raw)
++		}
++	}
++	if len(visible) == 0 {
++		return 0, false
++	}
++	serialized, err := json.Marshal(visible)
++	if err != nil {
++		return 0, false
++	}
++	desktopCodecs.Do(func() {
++		for _, encoding := range []tokenizer.Encoding{tokenizer.Cl100kBase, tokenizer.O200kBase} {
++			if codec, err := tokenizer.Get(encoding); err == nil {
++				desktopCodecs.codecs = append(desktopCodecs.codecs, codec)
++			}
++		}
++	})
++	if len(desktopCodecs.codecs) != 2 {
++		return 0, false
++	}
++	var count int64
++	for _, codec := range desktopCodecs.codecs {
++		n, err := codec.Count(string(serialized))
++		if err != nil {
++			return 0, false
++		}
++		count = max(count, int64(n))
++	}
++	return (count*6+4)/5 + 4096, true
++}
++
++var desktopDiagnosticMu sync.Mutex
++
++// DesktopDiagnostic accepts structural/numeric facts only. No prompt, tool
++// output, provider error message, headers, credentials or response body is saved.
++func DesktopDiagnostic(fields map[string]any) {
++	path := os.Getenv("CODEX_HARNESS_DIAGNOSTICS")
++	if path == "" || os.Getenv("CODEX_DESKTOP_COMPAT") != "1" {
++		return
++	}
++	desktopDiagnosticMu.Lock()
++	defer desktopDiagnosticMu.Unlock()
++	fields["at"] = time.Now().UTC().Format(time.RFC3339Nano)
++	data, err := json.Marshal(fields)
++	if err != nil {
++		return
++	}
++	if info, err := os.Stat(path); err == nil && info.Size() > 5*1024*1024 {
++		_ = os.Rename(path, path+".previous")
++	}
++	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
++	if err != nil {
++		return
++	}
++	defer func() { _ = f.Close() }()
++	_, _ = f.Write(append(data, '\n'))
++}
++
++func DesktopFailureSummary(model string, request []byte, status int, phase string) {
++	if model != "muse-spark-1.3-contributor" && model != "grok-4.6" {
++		return
++	}
++	// Phase is a call-site constant; do not put upstream text into this field.
++	DesktopDiagnostic(map[string]any{"event": "upstream_failure", "model": model, "status": status,
++		"phase": strings.TrimSpace(phase), "request_bytes": len(request),
++		"input_items": len(gjson.GetBytes(request, "input").Array()), "tool_entries": len(gjson.GetBytes(request, "tools").Array())})
++}
++
++func DesktopMuseCompatibilityEnabled(model string) bool {
++	return model == "muse-spark-1.3-contributor" && os.Getenv("CODEX_DESKTOP_COMPAT") == "1"
++}
++
++func DesktopRetryableBootstrap(model string, status int) bool {
++	if !DesktopMuseCompatibilityEnabled(model) {
++		return false
++	}
++	switch status {
++	case 500, 502, 503, 504:
++		return true
++	}
++	return false
++}
++
++// Repair already-handled empty-argument calls when resuming an older task.
++// Only calls with a recorded result are eligible; no pending action is created.
++func NormalizeDesktopMuseRequestArguments(model string, body []byte) []byte {
++	if !DesktopMuseCompatibilityEnabled(model) {
++		return body
++	}
++	outputs := make(map[string]bool)
++	items := gjson.GetBytes(body, "input").Array()
++	for _, item := range items {
++		if item.Get("type").String() == "function_call_output" && item.Get("call_id").String() != "" {
++			outputs[item.Get("call_id").String()] = true
++		}
++	}
++	count := 0
++	for i, item := range items {
++		if item.Get("type").String() == "function_call" && outputs[item.Get("call_id").String()] && strings.TrimSpace(item.Get("arguments").String()) == "" {
++			body, _ = sjson.SetBytes(body, "input."+strconv.Itoa(i)+".arguments", "{}")
++			count++
++		}
++	}
++	if count > 0 {
++		DesktopDiagnostic(map[string]any{"event": "empty_historical_arguments_normalized", "model": model, "count": count})
++	}
++	return body
++}
+--- /dev/null
++++ b/internal/runtime/executor/helps/desktop_responses_compat_test.go
+@@ -0,0 +1,143 @@
++package helps
++
++import (
++	"bytes"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestDesktopCompatHostedUsage(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	request := []byte(`{"instructions":"Follow the user","input":[{"role":"user","content":"Search the documentation"}],"tools":[{"type":"web_search"}]}`)
++	for _, model := range []string{"grok-4.6", "muse-spark-1.3-contributor"} {
++		s := NewDesktopResponsesCompat(model, request, request)
++		data := []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call","id":"w1"}],"usage":{"input_tokens":800000,"input_tokens_details":{"cached_tokens":790000,"cache_write_tokens":1000},"output_tokens":123,"output_tokens_details":{"reasoning_tokens":45},"total_tokens":800123}}}`)
++		out := s.Apply(data)
++		n := gjson.GetBytes(out, "response.usage.input_tokens").Int()
++		if n < 4096 || n > 5000 {
++			t.Fatalf("unexpected estimate %d", n)
++		}
++		if gjson.GetBytes(out, "response.usage.total_tokens").Int() != n+123 {
++			t.Fatal("inconsistent total")
++		}
++		if gjson.GetBytes(out, "response.provider_usage.total_tokens").Int() != 800123 {
++			t.Fatal("provider accounting lost")
++		}
++		if gjson.GetBytes(out, "response.usage.output_tokens_details.reasoning_tokens").Int() != 45 {
++			t.Fatal("reasoning changed")
++		}
++		if gjson.GetBytes(out, "response.usage.input_tokens_details.cached_tokens").Int() > n {
++			t.Fatal("cache exceeds input")
++		}
++		if gjson.GetBytes(out, "response.usage.input_tokens_details.cache_write_tokens").Int() != 0 {
++			t.Fatal("cache write exceeds remaining input")
++		}
++	}
++}
++
++func TestDesktopCompatDoesNotHideRealContextOrUnsupportedInputs(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	data := []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call"}],"usage":{"input_tokens":10000,"output_tokens":50,"total_tokens":10050}}}`)
++	cases := []string{
++		`{"input":[{"role":"user","content":"` + strings.Repeat("long history ", 10000) + `"}]}`,
++		`{"previous_response_id":"hidden","input":"hello"}`,
++		`{"input":[{"type":"message","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`,
++		`{"input":[{"type":"compaction","encrypted_content":"hidden"}]}`,
++	}
++	for _, request := range cases {
++		s := NewDesktopResponsesCompat("grok-4.6", []byte(request), []byte(request))
++		if !bytes.Equal(s.Apply(data), data) {
++			t.Fatal("unsupported/large input was discounted")
++		}
++	}
++	s := NewDesktopResponsesCompat("grok-4.6", []byte(`{"input":"hello"}`), []byte(`{"input":"hello"}`))
++	plain := bytes.ReplaceAll(data, []byte(`[{"type":"web_search_call"}]`), []byte(`[]`))
++	if !bytes.Equal(s.Apply(plain), plain) {
++		t.Fatal("non-agentic usage was changed")
++	}
++}
++
++func TestDesktopCompatNamespaceSSEAndTerminal(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	request := []byte(`{"input":"hello","tools":[{"type":"namespace","name":"apps.github","tools":[{"type":"function","name":"_search"}]}]}`)
++	s := NewDesktopResponsesCompat("muse-spark-1.3-contributor", request, request)
++	frame := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"apps.github._search\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}}\n\n")
++	out := s.Apply(frame)
++	if !bytes.Contains(out, []byte(`"namespace":"apps.github"`)) || !bytes.Contains(out, []byte(`"name":"_search"`)) || !bytes.Contains(out, []byte(`"call_id":"call_1"`)) {
++		t.Fatalf("bad namespace mapping: %s", out)
++	}
++	terminal := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"apps.github._search","call_id":"call_1","arguments":"{}"}]}}`)
++	if gjson.GetBytes(s.Apply(terminal), "response.output.0.namespace").String() != "apps.github" {
++		t.Fatal("terminal not normalized")
++	}
++}
++
++func TestDesktopCompatNamespaceAmbiguityAndScope(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	request := []byte(`{"tools":[{"type":"function","name":"ns.f"},{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f"}]}]}`)
++	data := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"ns.f","arguments":"{}"}}`)
++	s := NewDesktopResponsesCompat("muse-spark-1.3-contributor", request, request)
++	if !bytes.Equal(s.Apply(data), data) {
++		t.Fatal("top-level name collision rewritten")
++	}
++	for _, model := range []string{"gpt-6-astra", "glm-5.3-flash", "gemini-3.8-flash-high"} {
++		if NewDesktopResponsesCompat(model, request, request) != nil {
++			t.Fatal("unrelated model modified")
++		}
++	}
++	t.Setenv("CODEX_DESKTOP_COMPAT", "")
++	if NewDesktopResponsesCompat("grok-4.6", request, request) != nil {
++		t.Fatal("opt-in ignored")
++	}
++}
++
++func TestDesktopCompatEmptyArguments(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	s := NewDesktopResponsesCompat("muse-spark-1.3-contributor", []byte(`{}`), []byte(`{}`))
++	added := []byte(`{"type":"response.output_item.added","item":{"type":"function_call","name":"lookup","arguments":""}}`)
++	if !bytes.Equal(s.Apply(added), added) {
++		t.Fatal("stream placeholder changed")
++	}
++	done := bytes.ReplaceAll(added, []byte("output_item.added"), []byte("output_item.done"))
++	if gjson.GetBytes(s.Apply(done), "item.arguments").String() != "{}" {
++		t.Fatal("empty completed arguments remain invalid JSON")
++	}
++	invalid := bytes.ReplaceAll(done, []byte(`"arguments":""`), []byte(`"arguments":"not json"`))
++	if !bytes.Equal(s.Apply(invalid), invalid) {
++		t.Fatal("non-empty malformed arguments silently fabricated")
++	}
++	if !DesktopRetryableBootstrap("muse-spark-1.3-contributor", 500) || DesktopRetryableBootstrap("muse-spark-1.3-contributor", 400) || DesktopRetryableBootstrap("gpt-6-astra", 500) {
++		t.Fatal("incorrect retry scope")
++	}
++}
++
++func TestDesktopCompatHandledHistoryOnly(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	body := []byte(`{"input":[{"type":"function_call","call_id":"done","arguments":""},{"type":"function_call_output","call_id":"done","output":"Missing required argument"},{"type":"function_call","call_id":"pending","arguments":""}]}`)
++	out := NormalizeDesktopMuseRequestArguments("muse-spark-1.3-contributor", body)
++	if gjson.GetBytes(out, "input.0.arguments").String() != "{}" || gjson.GetBytes(out, "input.2.arguments").String() != "" || gjson.GetBytes(out, "input.1.output").String() != "Missing required argument" {
++		t.Fatal("history repair changed pending call or tool result")
++	}
++}
++
++func TestDesktopDiagnosticOmitsSensitiveRequest(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	p := filepath.Join(t.TempDir(), "diagnostics.jsonl")
++	t.Setenv("CODEX_HARNESS_DIAGNOSTICS", p)
++	DesktopFailureSummary("muse-spark-1.3-contributor", []byte(`{"input":"PRIVATE_SENTINEL","tools":[]}`), 500, "http_response")
++	b, err := os.ReadFile(p)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if bytes.Contains(b, []byte("PRIVATE_SENTINEL")) || !bytes.Contains(b, []byte(`"status":500`)) {
++		t.Fatal("invalid redacted diagnostic")
++	}
++	info, _ := os.Stat(p)
++	if info.Mode().Perm() != 0600 {
++		t.Fatal("diagnostic is not private")
++	}
++}

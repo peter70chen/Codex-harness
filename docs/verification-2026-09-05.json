@@ -1,0 +1,129 @@
+{
+  "date": "2026-09-05",
+  "version": "7.2.150-desktopfix1",
+  "machines": {
+    "Laptop": {
+      "thinking": "high",
+      "installed_binary_sha256": "a4135c0ee2a03cb7cf4fccc7bd5aa64db87f5a73271f5f13ef769760fae88a49",
+      "muse_rounds": 3,
+      "muse_validated_tool_calls": 3,
+      "muse_invalid_arguments_recovered": 0,
+      "grok_search_rounds": 2,
+      "grok_web_actions": 5,
+      "unexpected_compactions": 0,
+      "basic_model_checks": [
+        {
+          "model": "grok-4.6",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "muse-spark-1.3-contributor",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "glm-5.3-flash",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "gemini-3.8-flash-high",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    "OfficeMac": {
+      "thinking": "high",
+      "installed_binary_sha256": "a4135c0ee2a03cb7cf4fccc7bd5aa64db87f5a73271f5f13ef769760fae88a49",
+      "muse_rounds": 3,
+      "muse_validated_tool_calls": 3,
+      "muse_invalid_arguments_recovered": 0,
+      "grok_search_rounds": 2,
+      "grok_web_actions": 5,
+      "unexpected_compactions": 0,
+      "basic_model_checks": [
+        {
+          "model": "grok-4.6",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "muse-spark-1.3-contributor",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "glm-5.3-flash",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "gemini-3.8-flash-high",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    "HomeMac": {
+      "thinking": "high",
+      "installed_binary_sha256": "a4135c0ee2a03cb7cf4fccc7bd5aa64db87f5a73271f5f13ef769760fae88a49",
+      "muse_rounds": 3,
+      "muse_validated_tool_calls": 3,
+      "muse_invalid_arguments_recovered": 2,
+      "grok_search_rounds": 2,
+      "grok_web_actions": 5,
+      "unexpected_compactions": 0,
+      "basic_model_checks": [
+        {
+          "model": "grok-4.6",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "muse-spark-1.3-contributor",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "glm-5.3-flash",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        },
+        {
+          "model": "gemini-3.8-flash-high",
+          "thinking": "high",
+          "http_status": 200,
+          "completed": true,
+          "pass": true
+        }
+      ],
+      "pass": true
+    }
+  }
+}
