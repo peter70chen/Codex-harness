@@ -1,0 +1,59 @@
+{
+  "date": "2026-09-06",
+  "scope": [
+    "OfficeMac",
+    "HomeMac"
+  ],
+  "cause": "External-only custom model catalogs replaced native GPT entries, and remote proxies had no native Codex auth route.",
+  "native_visible_models": [
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark"
+  ],
+  "catalog_check": {
+    "OfficeMac": "native app-server model/list passed",
+    "HomeMac": "native app-server model/list passed"
+  },
+  "native_turn_checks": [
+    {
+      "machine": "HomeMac",
+      "model": "gpt-6-astra",
+      "completed": true
+    },
+    {
+      "machine": "OfficeMac",
+      "model": "gpt-5.4-mini",
+      "completed": true
+    },
+    {
+      "machine": "HomeMac",
+      "model": "gpt-5.4-mini",
+      "completed": true
+    }
+  ],
+  "external_health": {
+    "OfficeMac": {
+      "passed": 4,
+      "total": 4
+    },
+    "HomeMac": {
+      "passed": 4,
+      "total": 4
+    }
+  },
+  "synthetic_tests": [
+    "native auth rotation, isolation, opt-in and missing-login failure",
+    "native registry model supplementation",
+    "catalog merge metadata, hidden entries, idempotence and empty-cache rejection",
+    "native Muse namespace dispatch and temporary-failure retry",
+    "native Grok hosted-search usage compaction regression"
+  ],
+  "binary_sha256": "16742e2b9706e0c5533c8a8868d24d87bf1dcbb6578de67b006238969fd0e720",
+  "app_restarted": false,
+  "activation": "Reload Codex on each machine to load the repaired catalog.",
+  "limitations": "Bounded connection tests; not a long-running reliability guarantee. Native credential refresh remains owned by Codex."
+}

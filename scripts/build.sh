@@ -19,7 +19,8 @@ else
 fi
 cd "$SOURCE"
 "$GO_BIN" test ./internal/runtime/executor/helps -count=1
-"$GO_BIN" test ./internal/runtime/executor -run 'TestCodexExecutor|TestCodex.*Stream|TestXAIExecutor' -count=1
+"$GO_BIN" test ./internal/runtime/executor -run 'TestCodexDesktopNativeAuth|TestCodexExecutor|TestCodex.*Stream|TestXAIExecutor' -count=1
+"$GO_BIN" test ./sdk/cliproxy -run 'TestDesktopNativeModels|TestRegisterModelsForAuthCodex' -count=1
 "$GO_BIN" test ./sdk/cliproxy/auth -run 'TestManager_MarkResult_Transient|Test.*RetryRound|Test.*Cooldown.*Wait' -count=1
 "$GO_BIN" build -ldflags '-X main.Version=7.2.150-desktopfix1' -o "$ROOT/build/cliproxyapi-desktopfix1" ./cmd/server
 echo "Built $ROOT/build/cliproxyapi-desktopfix1"

@@ -2,6 +2,17 @@
 from pathlib import Path
 import datetime,hashlib,json,os,plistlib,re,shutil,subprocess,sys,time,urllib.request
 
+# Validate the native catalog before touching any running service.
+from merge_native_models import merge
+catalog_path = Path.home()/'.codex/cliproxyapi/models.json'
+native_path = Path.home()/'.codex/models_cache.json'
+current_catalog = json.loads(catalog_path.read_text())
+merged_catalog = merge(json.loads(native_path.read_text()), current_catalog)
+current_ids = {m['slug'] for m in current_catalog['models'] if m.get('visibility') == 'list'}
+required_ids = {m['slug'] for m in merged_catalog['models'] if m['slug'].startswith('gpt-') and m.get('visibility') == 'list'}
+if not required_ids <= current_ids:
+    raise SystemExit('Native GPT models missing. Run scripts/merge_native_models.py before installation.')
+
 source=Path(sys.argv[1]).resolve();private=Path.home()/'.codex/cliproxyapi'
 private.mkdir(mode=0o700,exist_ok=True);private.chmod(0o700)
 stamp=datetime.datetime.now().strftime('%Y%m%d-%H%M%S');backup=private/('desktopfix-backup-'+stamp);backup.mkdir(mode=0o700)

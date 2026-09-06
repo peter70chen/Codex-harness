@@ -20,6 +20,8 @@ Claude 已依此部署的選擇排除。以上容量是部署設定，不是對�
 - 還原 Muse 的 `namespace.function` 工具名稱，修正完成呼叫及已處理歷史的空白 arguments。
 - Muse 的 Gmail 遞迴 schema 使用限定範圍的相容性 override；工具端仍驗證實際參數。
 - 診斷僅記錄模型、狀態碼、結構大小和數字用量。
+- 原生 GPT 清單從該機 Codex 模型資料合併，保留各模型的 Thinking、容量和顯示設定；安裝前檢查是否遺失 GPT。
+- 可選的原生登入參照每次請求讀取該機現有的 ChatGPT access token，登入更新仍由 Codex 負責，不複製或輪替 refresh token。
 
 Context 修正預設只對 `grok-4.6`、`muse-spark-1.3-contributor` 生效，並要求服務設定 `CODEX_DESKTOP_COMPAT=1`。Gemini／GLM 不套用這項特殊用量改寫。
 
@@ -55,14 +57,27 @@ Installer 會備份設定、停用 Homebrew 舊服務，改由 `com.peter.codex-
 
 每次安裝的私有備份目錄都有 `rollback.py`，以 Python 執行即可恢復備份的 proxy 設定並啟動 Homebrew 服務。不要同時啟用兩套服務。後續升級上游需重新檢查 patch，不能把一般 Homebrew upgrade 當成本修正版的升級程序。
 
+## 保留原生 GPT
+
+先執行 `python3 scripts/merge_native_models.py`，將本機 `~/.codex/models_cache.json` 的原生 GPT 資料合併到自訂清單。此操作有備份，四個外接模型設定會保留。模型清單在 Codex 啟動時載入，變更後需重新載入 App。
+
+GPT 還需要可用的代理路由。若此代理尚未另外完成 Codex OAuth，請在升級至包含原生登入修正的 binary 後執行 `python3 scripts/enable_native_login.py`。它只建立 `~/.cli-proxy-api/codex-desktop-native.json` 的參照標記；服務需有 `CODEX_DESKTOP_COMPAT=1`。每次 GPT 請求使用本機 `~/.codex/auth.json` 的最新 access token，絕不把 refresh token 交給代理刷新。登出或失去登入資料時請求會失敗，應在該機重新登入 Codex。此功能限檔案形式的 ChatGPT 登入，並非通用的 Keychain 登入整合。
+
+原生帳號提供、但代理上游模型表遺漏的 GPT，會從該機原生模型 cache 補入路由。這不增加帳號權限，最終可用性仍由 OpenAI 判定。驗證時必須同時檢查 Codex `model/list` 和一個實際 GPT 回覆，不能只檢查外接模型。
+
+取消原生登入參照可刪除上述參照標記。這不影響 Codex 自己的登入；自訂清單如需還原，可使用合併前的 `models.before-native-merge.*.json` 備份。
+
 ## 驗證
 
 ```bash
+python3 -m unittest discover -s tests -p 'test_model_catalog.py'
+
 # Native Codex + fake upstream: no provider credentials used.
 python3 tests/integration.py
 INJECT_FAILURE=sse python3 tests/integration.py
 
 # Real providers: consumes provider quota.
+python3 tests/native_gpt.py gpt-5.4-mini
 python3 tests/native_live.py muse-spark-1.3-contributor
 python3 tests/native_live.py grok-4.6
 ```

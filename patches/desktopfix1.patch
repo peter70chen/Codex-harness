@@ -1,6 +1,48 @@
+diff --git a/internal/runtime/executor/codex_executor_auth.go b/internal/runtime/executor/codex_executor_auth.go
+index e200d69..28e2465 100644
+--- a/internal/runtime/executor/codex_executor_auth.go
++++ b/internal/runtime/executor/codex_executor_auth.go
+@@ -13,6 +13,9 @@ import (
+ )
+ 
+ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
++	if auth != nil && auth.Metadata["desktop_native_auth"] == true {
++		return auth, nil
++	}
+ 	log.Debugf("codex executor: refresh called")
+ 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+ 		return refreshed, err
+diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
+index d7c6dbd..489e57a 100644
+--- a/internal/runtime/executor/codex_executor_execute.go
++++ b/internal/runtime/executor/codex_executor_execute.go
+@@ -19,6 +19,10 @@ import (
+ )
+ 
+ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
++	auth, err = desktopNativeAuth(auth)
++	if err != nil {
++		return resp, err
++	}
+ 	if opts.Alt == "responses/compact" {
+ 		return e.executeCompact(ctx, auth, req, opts)
+ 	}
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index b51e273..b3acb2c 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -67,6 +67,7 @@
+@@ -21,6 +21,10 @@ import (
+ )
+ 
+ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
++	auth, err = desktopNativeAuth(auth)
++	if err != nil {
++		return nil, err
++	}
+ 	if opts.Alt == "responses/compact" {
+ 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+ 	}
+@@ -67,6 +71,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  	}
  	body = helps.SetStringIfDifferent(body, "model", baseModel)
  	body = normalizeCodexInstructions(body)
@@ -8,7 +50,7 @@
  	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
  		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
  	}
-@@ -115,6 +116,7 @@
+@@ -115,6 +120,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  	}
  	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
  	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -16,7 +58,7 @@
  		data, readErr := io.ReadAll(httpResp.Body)
  		if errClose := httpResp.Body.Close(); errClose != nil {
  			log.Errorf("codex executor: close response body error: %v", errClose)
-@@ -133,7 +135,7 @@
+@@ -133,7 +139,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  		return nil, err
  	}
  
@@ -25,7 +67,7 @@
  
  	scanner := bufio.NewScanner(httpResp.Body)
  	scanner.Buffer(nil, 52_428_800) // 50MB
-@@ -175,6 +177,7 @@
+@@ -175,6 +181,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				translatedLine = append([]byte("data: "), data...)
  				eventType := gjson.GetBytes(data, "type").String()
  				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
@@ -33,7 +75,7 @@
  					closeBootstrapBody()
  					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
  						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
-@@ -183,6 +186,11 @@
+@@ -183,6 +190,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  					}
  					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
  					reporter.PublishFailure(ctx, streamErr)
@@ -45,7 +87,7 @@
  					if isCodexOverloadBootstrapFailure(terminalBody) {
  						// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
  						// attempt before the downstream headers are committed so the conductor can
-@@ -305,6 +313,7 @@
+@@ -305,6 +317,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  				translatedLine = append([]byte("data: "), data...)
  				eventType := gjson.GetBytes(data, "type").String()
  				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
@@ -53,9 +95,131 @@
  					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
  						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
  						reporter.PublishFailure(ctx, errClearReplay)
+diff --git a/internal/runtime/executor/desktop_native_auth.go b/internal/runtime/executor/desktop_native_auth.go
+new file mode 100644
+index 0000000..28665e2
+--- /dev/null
++++ b/internal/runtime/executor/desktop_native_auth.go
+@@ -0,0 +1,51 @@
++package executor
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++)
++
++// desktopNativeAuth borrows only the current native access token. Codex remains
++// the sole owner of refresh-token rotation; no credentials are persisted here.
++func desktopNativeAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
++	if auth == nil || auth.Metadata["desktop_native_auth"] != true {
++		return auth, nil
++	}
++	fail := func() (*cliproxyauth.Auth, error) {
++		return nil, statusErr{code: 401, msg: "native Codex login unavailable; sign in to Codex on this computer"}
++	}
++	if os.Getenv("CODEX_DESKTOP_COMPAT") != "1" || auth.Provider != "codex" {
++		return fail()
++	}
++	if auth.Attributes["api_key"] != "" || auth.Attributes["base_url"] != "" || auth.Metadata["base_url"] != nil {
++		return fail()
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return fail()
++	}
++	raw, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
++	if err != nil {
++		return fail()
++	}
++	var native struct {
++		Mode   string `json:"auth_mode"`
++		Tokens struct {
++			Access  string `json:"access_token"`
++			Account string `json:"account_id"`
++		} `json:"tokens"`
++	}
++	if json.Unmarshal(raw, &native) != nil || native.Mode != "chatgpt" || native.Tokens.Access == "" || native.Tokens.Account == "" {
++		return fail()
++	}
++	clone := auth.Clone()
++	clone.Metadata["access_token"] = native.Tokens.Access
++	clone.Metadata["account_id"] = native.Tokens.Account
++	delete(clone.Metadata, "refresh_token")
++	delete(clone.Metadata, "id_token")
++	delete(clone.Metadata, "expired")
++	return clone, nil
++}
+diff --git a/internal/runtime/executor/desktop_native_auth_test.go b/internal/runtime/executor/desktop_native_auth_test.go
+new file mode 100644
+index 0000000..aa475a6
+--- /dev/null
++++ b/internal/runtime/executor/desktop_native_auth_test.go
+@@ -0,0 +1,57 @@
++package executor
++
++import (
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestCodexDesktopNativeAuth(t *testing.T) {
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	if err := os.Mkdir(filepath.Join(home, ".codex"), 0700); err != nil {
++		t.Fatal(err)
++	}
++	p := filepath.Join(home, ".codex", "auth.json")
++	write := func(token, account string) {
++		t.Helper()
++		if err := os.WriteFile(p, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"`+token+`","account_id":"`+account+`","refresh_token":"never-copy"}}`), 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	a := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"desktop_native_auth": true}}
++	write("first-access", "first-account")
++	b, err := desktopNativeAuth(a)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if b.Metadata["access_token"] != "first-access" || b.Metadata["account_id"] != "first-account" || b.Metadata["refresh_token"] != nil || a.Metadata["access_token"] != nil {
++		t.Fatal("credentials not isolated")
++	}
++	write("rotated-access", "second-account")
++	b, err = desktopNativeAuth(a)
++	if err != nil || b.Metadata["access_token"] != "rotated-access" || b.Metadata["account_id"] != "second-account" {
++		t.Fatal("did not read current native login")
++	}
++	a.Attributes = map[string]string{"base_url": "https://other-provider.invalid"}
++	if _, err = desktopNativeAuth(a); err == nil {
++		t.Fatal("must reject external endpoint")
++	}
++	a.Attributes = nil
++	t.Setenv("CODEX_DESKTOP_COMPAT", "0")
++	if _, err = desktopNativeAuth(a); err == nil {
++		t.Fatal("must require opt-in")
++	}
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	os.Remove(p)
++	if _, err = desktopNativeAuth(a); err == nil || strings.Contains(err.Error(), home) {
++		t.Fatal("missing login must fail closed without private details")
++	}
++	ordinary := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"access_token": "unchanged"}}
++	if b, err = desktopNativeAuth(ordinary); err != nil || b != ordinary {
++		t.Fatal("ordinary auth changed")
++	}
++}
+diff --git a/internal/runtime/executor/helps/claude_input_tokens.go b/internal/runtime/executor/helps/claude_input_tokens.go
+index 2147590..de31d30 100644
 --- a/internal/runtime/executor/helps/claude_input_tokens.go
 +++ b/internal/runtime/executor/helps/claude_input_tokens.go
-@@ -29,6 +29,8 @@
+@@ -29,6 +29,8 @@ type ClaudeInputTokenState struct {
  	originalRequest []byte
  	codec           tokenizer.Codec
  	handled         bool
@@ -64,7 +228,7 @@
  }
  
  // NewClaudeInputTokenState creates request-scoped state for translated Claude input token usage.
-@@ -64,8 +66,15 @@
+@@ -64,8 +66,15 @@ func TranslateStreamWithClaudeInputTokens(
  		param,
  	)
  	if responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -80,6 +244,9 @@
  		}
  	}
  	if state == nil {
+diff --git a/internal/runtime/executor/helps/desktop_responses_compat.go b/internal/runtime/executor/helps/desktop_responses_compat.go
+new file mode 100644
+index 0000000..63397bb
 --- /dev/null
 +++ b/internal/runtime/executor/helps/desktop_responses_compat.go
 @@ -0,0 +1,308 @@
@@ -391,6 +558,9 @@
 +	}
 +	return body
 +}
+diff --git a/internal/runtime/executor/helps/desktop_responses_compat_test.go b/internal/runtime/executor/helps/desktop_responses_compat_test.go
+new file mode 100644
+index 0000000..3df646d
 --- /dev/null
 +++ b/internal/runtime/executor/helps/desktop_responses_compat_test.go
 @@ -0,0 +1,143 @@
@@ -537,3 +707,113 @@
 +		t.Fatal("diagnostic is not private")
 +	}
 +}
+diff --git a/sdk/cliproxy/desktop_native_models.go b/sdk/cliproxy/desktop_native_models.go
+new file mode 100644
+index 0000000..a72f7f6
+--- /dev/null
++++ b/sdk/cliproxy/desktop_native_models.go
+@@ -0,0 +1,57 @@
++package cliproxy
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++)
++
++// A proxy registry update must not remove a model advertised by the user's
++// native Codex account. Preserve upstream metadata and append only missing GPTs.
++func desktopNativeModels(auth *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
++	if os.Getenv("CODEX_DESKTOP_COMPAT") != "1" || auth == nil || auth.Provider != "codex" || auth.Metadata["desktop_native_auth"] != true {
++		return models
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return models
++	}
++	data, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json"))
++	if err != nil {
++		return models
++	}
++	var cache struct {
++		Models []struct {
++			Slug      string `json:"slug"`
++			Display   string `json:"display_name"`
++			Context   int    `json:"context_window"`
++			Reasoning []struct {
++				Effort string `json:"effort"`
++			} `json:"supported_reasoning_levels"`
++		} `json:"models"`
++	}
++	if json.Unmarshal(data, &cache) != nil {
++		return models
++	}
++	seen := map[string]bool{}
++	for _, m := range models {
++		seen[m.ID] = true
++	}
++	out := append([]*ModelInfo(nil), models...)
++	for _, m := range cache.Models {
++		if !strings.HasPrefix(m.Slug, "gpt-") || seen[m.Slug] {
++			continue
++		}
++		levels := []string{}
++		for _, r := range m.Reasoning {
++			levels = append(levels, r.Effort)
++		}
++		out = append(out, &ModelInfo{ID: m.Slug, Object: "model", OwnedBy: "openai", Type: "codex", DisplayName: m.Display, ContextLength: m.Context, Thinking: &registry.ThinkingSupport{Levels: levels}})
++		seen[m.Slug] = true
++	}
++	return out
++}
+diff --git a/sdk/cliproxy/desktop_native_models_test.go b/sdk/cliproxy/desktop_native_models_test.go
+new file mode 100644
+index 0000000..b542c7d
+--- /dev/null
++++ b/sdk/cliproxy/desktop_native_models_test.go
+@@ -0,0 +1,29 @@
++package cliproxy
++
++import (
++	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestDesktopNativeModels(t *testing.T) {
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	t.Setenv("CODEX_DESKTOP_COMPAT", "1")
++	os.Mkdir(filepath.Join(home, ".codex"), 0700)
++	data := `{"models":[{"slug":"gpt-existing","context_window":1},{"slug":"gpt-missing","context_window":123456,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},{"slug":"other-provider"}]}`
++	if err := os.WriteFile(filepath.Join(home, ".codex", "models_cache.json"), []byte(data), 0600); err != nil {
++		t.Fatal(err)
++	}
++	original := []*ModelInfo{{ID: "gpt-existing", ContextLength: 999}}
++	a := &coreauth.Auth{Provider: "codex", Metadata: map[string]any{"desktop_native_auth": true}}
++	got := desktopNativeModels(a, original)
++	if len(got) != 2 || got[0] != original[0] || got[1].ID != "gpt-missing" || got[1].ContextLength != 123456 || len(got[1].Thinking.Levels) != 2 {
++		t.Fatal("native model merge failed")
++	}
++	a.Metadata = nil
++	if len(desktopNativeModels(a, original)) != 1 {
++		t.Fatal("ordinary provider modified")
++	}
++}
+diff --git a/sdk/cliproxy/service_models.go b/sdk/cliproxy/service_models.go
+index 553123b..1f73191 100644
+--- a/sdk/cliproxy/service_models.go
++++ b/sdk/cliproxy/service_models.go
+@@ -140,6 +140,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
+ 		default:
+ 			models = registry.GetCodexProModels()
+ 		}
++		models = desktopNativeModels(a, models)
+ 		models = applyExcludedModels(models, excluded)
+ 	case "kimi":
+ 		models = registry.GetKimiModels()
