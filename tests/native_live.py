@@ -4,7 +4,7 @@ import datetime,json,os,queue,re,shutil,subprocess,tempfile,threading,time,sys
 
 model=sys.argv[1];port=int(os.getenv('TEST_PROXY_PORT','8317'))
 private=Path.home()/'.codex/cliproxyapi';root=Path(__file__).resolve().parents[1]/'build/test-results';root.mkdir(parents=True,exist_ok=True)
-fixture=json.loads((private/'desktop-tools-schema.json').read_text())
+fixture=json.loads(Path(os.getenv('NATIVE_TOOLS_FIXTURE',str(private/'desktop-tools-schema.json'))).read_text())
 dynamic=[{'type':'namespace','name':'verification_'+ns['name'],'description':ns.get('description','')[:1024],'tools':[{'type':'function','name':f['name'],'description':f.get('description',''),'inputSchema':f['parameters']} for f in ns['tools']]} for ns in fixture if ns.get('type')=='namespace']
 dynamic.append({'type':'namespace','name':'verification_probe','description':'Harmless diagnostic lookup; returns supplied text.','tools':[{'type':'function','name':'lookup','description':'Echo the supplied diagnostic value','inputSchema':{'type':'object','properties':{'value':{'type':'string'}},'required':['value'],'additionalProperties':False}}]})
 conf=Path('/opt/homebrew/etc/cliproxyapi.conf').read_text();key=re.search(r'api-keys:\s*\n\s*- "([^"]+)"',conf).group(1)

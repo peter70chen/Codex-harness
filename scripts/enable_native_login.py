@@ -23,7 +23,7 @@ def main():
         if current != data:
             raise SystemExit('Native marker already exists with different settings; inspect before replacing.')
     else:
-        with marker.open('x', opener=lambda p, f: os.open(p, f, 0o600)) as out:
+        with open(marker, 'x', opener=lambda p, f: os.open(p, f, 0o600)) as out:
             json.dump(data, out)
             out.write('\n')
     marker.chmod(0o600)

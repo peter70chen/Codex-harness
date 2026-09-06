@@ -57,6 +57,16 @@ Installer 會備份設定、停用 Homebrew 舊服務，改由 `com.peter.codex-
 
 每次安裝的私有備份目錄都有 `rollback.py`，以 Python 執行即可恢復備份的 proxy 設定並啟動 Homebrew 服務。不要同時啟用兩套服務。後續升級上游需重新檢查 patch，不能把一般 Homebrew upgrade 當成本修正版的升級程序。
 
+## Muse 工具巢狀層數相容性
+
+Muse／OpenCode Go 會拒絕超過 10 層的工具 JSON schema，即使該輪只是問候、沒有使用那個工具。2026-09-06 HomeMac 的 Trip.com 活動卡片工具新增了 11 層結構，導致整個請求失敗；舊工具 fixture 與簡短健康檢查沒有涵蓋它。
+
+可使用 `python3 scripts/fix_muse_depth.py --fixture /private/path/tools-only.json`，從受影響請求的私有工具定義產生 Muse 專用 payload 規則。腳本目前處理 inline schema，遞迴 `$ref` 仍由既有 Muse Gmail 規則處理。超限邊界保留容器型別、required keys，將更深欄位規格改放 description；這會放寬供應商端該部分的 schema 約束，實際工具必須繼續用原始 schema 驗證參數。它不移除工具，不變更 GPT／Grok／Gemini／GLM 規則。
+
+設定修改前會備份，CLIProxyAPI 會熱載入，不需重啟 App 或代理。還原可將 `proxy.before-muse-depth.*.conf` 備份複製回 proxy 設定。完整工具 fixture 不可提交至 repository。
+
+以受影響工具清單執行原生回歸：`NATIVE_TOOLS_FIXTURE=/private/path/tools-only.json python3 tests/native_live.py muse-spark-1.3-contributor`。測試會改用安全的 namespace 前綴，只允許合成 lookup 呼叫，拒絕其他工具執行；模型定向規則以工具名稱匹配這些 schema。
+
 ## 保留原生 GPT
 
 先執行 `python3 scripts/merge_native_models.py`，將本機 `~/.codex/models_cache.json` 的原生 GPT 資料合併到自訂清單。此操作有備份，四個外接模型設定會保留。模型清單在 Codex 啟動時載入，變更後需重新載入 App。

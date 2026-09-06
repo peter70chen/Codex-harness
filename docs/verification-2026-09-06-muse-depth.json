@@ -1,0 +1,33 @@
+{
+  "date": "2026-09-06",
+  "machine": "HomeMac",
+  "model": "muse-spark-1.3-contributor",
+  "cause": "A Trip.com activity rendering tool in the current desktop tool set exceeded the provider schema depth limit of 10.",
+  "affected_tool_sets": 37,
+  "maximum_observed_inline_schema_depth": 11,
+  "model_scoped_boundary_overrides": 2,
+  "exact_tool_set_request": {
+    "http_status": 200,
+    "completed": true,
+    "marker": "MUSE_OK"
+  },
+  "native_regression": {
+    "rounds": 3,
+    "completed_tool_calls": 3,
+    "invalid_tool_calls": 0,
+    "compactions": 0,
+    "seconds": [
+      37.99,
+      10.44,
+      15.29
+    ],
+    "last_input_tokens": [
+      226768,
+      226903,
+      227038
+    ]
+  },
+  "service_restarted": false,
+  "codex_restart_required": false,
+  "limitations": "Boundary schema details are expressed as text for Muse; actual tools retain their original argument validation. Inline schemas only; recursive Gmail refs retain their separate compatibility rule. Bounded regression, not a guarantee for future connector schemas."
+}

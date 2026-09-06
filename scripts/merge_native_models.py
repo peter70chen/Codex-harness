@@ -33,7 +33,7 @@ def main():
         shutil.copy2(args.catalog, backup)
         backup.chmod(0o600)
         stage = args.catalog.with_suffix('.new')
-        with stage.open('w', opener=lambda p, f: os.open(p, f, 0o600)) as out:
+        with open(stage, 'w', opener=lambda p, f: os.open(p, f, 0o600)) as out:
             json.dump(new, out, indent=2)
             out.write('\n')
         stage.chmod(0o600)
